@@ -106,11 +106,7 @@ launchctl list | grep lark-bridge
 code: 230001, msg: 'This message is NOT a card.'
 ```
 **原因**：Thinking 佔位符是純文字，`message.patch` 嘗試更新時 Lark 回報錯誤。
-**影響**：僅 cosmetic，回覆仍會以新訊息發出。
-**修復方向**：改用 Interactive Card 作為佔位符，或 patch 失敗時 fallback 刪除 + 重發。
-
-### 圖片下載失敗
-確認 Lark App 有 `im:resource` 權限，且 App 已發布。
+**處理**：已修復。patch 失敗時自動刪除佔位符，改用新訊息發送回覆。
 
 ## 除錯
 

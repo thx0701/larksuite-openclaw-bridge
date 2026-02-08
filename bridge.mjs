@@ -491,6 +491,8 @@ async function handleMessage(data) {
           data: { content: JSON.stringify({ text: trimmed }) },
         });
       } catch {
+        // patch failed (230001: not a card) — delete placeholder and send new message
+        try { await client.im.message.delete({ path: { message_id: placeholderId } }); } catch {}
         await client.im.message.create({
           params: { receive_id_type: "chat_id" },
           data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: trimmed }) },
