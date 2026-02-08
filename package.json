@@ -1,0 +1,19 @@
+{
+  "name": "openclaw-lark-bridge",
+  "version": "0.2.0",
+  "description": "Larksuite ↔ OpenClaw Bridge — Webhook bridge for Lark Bot with image, rich text, and group chat support",
+  "type": "module",
+  "main": "bridge.mjs",
+  "bin": {
+    "openclaw-lark-bridge": "./bridge.mjs"
+  },
+  "scripts": {
+    "start": "node bridge.mjs"
+  },
+  "keywords": ["openclaw", "lark", "larksuite", "feishu", "chatbot", "bridge", "webhook"],
+  "license": "MIT",
+  "dependencies": {
+    "@larksuiteoapi/node-sdk": "^1.45.0",
+    "ws": "^8.19.0"
+  }
+}
