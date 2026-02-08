@@ -22,9 +22,29 @@ Lark 用戶 → Lark Server → (HTTPS) → Cloudflare Tunnel
 | Thinking 佔位符 | ✅ | 超過 2.5 秒顯示「Thinking…」，完成後替換 |
 | 去重 (Dedup) | ✅ | 10 分鐘內同 `message_id` 不重複處理 |
 | 圖片回傳 | ✅ | `mediaUrls` 下載 → 上傳 Lark → 發送 |
+| MEDIA: 自動轉發 | ✅ | Agent 回覆中的本地截圖自動上傳發送 |
 | PDF/檔案回傳 | ❌ | 尚未實作 |
 | 加密解密 | ✅ | AES-256-CBC，支援 Lark Encrypt Key |
 | Challenge 驗證 | ✅ | `url_verification` + Verification Token |
+
+## 指令
+
+| 指令 | 說明 |
+|------|------|
+| `/help` | 顯示所有可用指令 |
+| `/reset` | 重置對話 session（開始新對話，舊 session 保留） |
+| `/status` | 顯示目前 session key、chat ID、chat type |
+| `/draw <描述>` | AI 生圖（Gemini Imagen），例如 `/draw 一隻在月球上的貓` |
+
+## REST API
+
+Bridge 提供 REST API 供外部呼叫：
+
+| Endpoint | Method | Body | 說明 |
+|----------|--------|------|------|
+| `/health` | GET | — | 健康檢查 |
+| `/api/send-image` | POST | `{ chat_id, file_path }` | 上傳本地圖片並發送到指定聊天 |
+| `/api/send-text` | POST | `{ chat_id, text }` | 發送文字訊息到指定聊天 |
 
 ## 環境變數
 
@@ -40,6 +60,9 @@ Lark 用戶 → Lark Server → (HTTPS) → Cloudflare Tunnel
 | `LARKSUITE_VERIFICATION_TOKEN` | — | — | Lark 驗證 Token |
 | `LARKSUITE_MEDIA_DIR` | — | `~/.clawdbot/media/larksuite` | 圖片暫存目錄 |
 | `LARKSUITE_THINKING_THRESHOLD_MS` | — | `2500` | 顯示 Thinking 的等待毫秒 |
+| `GEMINI_API_KEY` | — | — | Gemini API Key（直接值，供 `/draw` 使用） |
+| `GEMINI_API_KEY_PATH` | — | `~/.openclaw/secrets/gemini_api_key` | Gemini API Key 檔案路徑 |
+| `GEMINI_IMAGE_MODEL` | — | `gemini-2.0-flash-exp-image-generation` | Gemini 生圖模型 |
 
 > `*` `APP_SECRET` 和 `APP_SECRET_PATH` 二擇一
 
@@ -126,3 +149,10 @@ tail -f ~/.openclaw/logs/lark-bridge.log
 - 加入群組智慧回覆（@提及、問句、動詞判斷）
 - 部署為 launchd 持久服務
 - Cloudflare Tunnel 路由設定完成
+- 加入 `/reset`、`/status` 指令
+- 修復 230001 Card Error（patch 失敗時刪除佔位符改用新訊息）
+- 加入 `/help` 指令列表
+- 加入 `/draw` 指令（Gemini Imagen 生圖）
+- 加入 `/api/send-image`、`/api/send-text` REST API
+- 加入 `MEDIA:` 路徑自動偵測轉發（agent 截圖 → Lark）
+- 修復 `uploadImage`：使用 `createReadStream` + 相容 SDK response 結構
