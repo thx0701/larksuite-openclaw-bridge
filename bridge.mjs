@@ -176,19 +176,60 @@ async function downloadImage(messageId, imageKey) {
   return null;
 }
 
+// ─── Gemini Image Generation ─────────────────────────────────────────
+const GEMINI_API_KEY = (() => {
+  const keyPath = resolve(process.env.GEMINI_API_KEY_PATH || "~/.openclaw/secrets/gemini_api_key");
+  try { return fs.readFileSync(keyPath, "utf8").trim(); } catch { return process.env.GEMINI_API_KEY || ""; }
+})();
+const GEMINI_IMAGE_MODEL = process.env.GEMINI_IMAGE_MODEL || "gemini-2.0-flash-exp-image-generation";
+
+async function generateImage(prompt) {
+  if (!GEMINI_API_KEY) return { error: "GEMINI_API_KEY not configured" };
+  
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_IMAGE_MODEL}:generateContent?key=${GEMINI_API_KEY}`;
+  const body = JSON.stringify({
+    contents: [{ parts: [{ text: `Generate an image: ${prompt}` }] }],
+    generationConfig: { responseModalities: ["TEXT", "IMAGE"] },
+  });
+
+  const res = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body });
+  const data = await res.json();
+
+  if (data.error) return { error: data.error.message || JSON.stringify(data.error) };
+  if (!data.candidates?.[0]?.content?.parts) return { error: "No response from Gemini" };
+
+  let text = "";
+  let imagePath = null;
+  for (const part of data.candidates[0].content.parts) {
+    if (part.inlineData) {
+      const buf = Buffer.from(part.inlineData.data, "base64");
+      const ext = part.inlineData.mimeType?.includes("png") ? "png" : "jpg";
+      imagePath = path.join(MEDIA_DIR, `gemini_${crypto.randomUUID()}.${ext}`);
+      fs.writeFileSync(imagePath, buf);
+      console.log(`[DRAW] Saved: ${imagePath} (${buf.length} bytes)`);
+    } else if (part.text) {
+      text = part.text;
+    }
+  }
+  return { imagePath, text };
+}
+
 async function uploadImage(imagePath) {
   try {
-    const imageBuffer = fs.readFileSync(imagePath);
+    console.log(`[IMAGE] Uploading: ${imagePath}`);
+    const imageStream = fs.createReadStream(imagePath);
     const response = await client.im.image.create({
       data: {
         image_type: "message",
-        image: imageBuffer,
+        image: imageStream,
       },
     });
+    console.log(`[IMAGE] Upload response:`, JSON.stringify(response));
     
-    if (response?.data?.image_key) {
-      console.log(`[IMAGE] Uploaded: ${response.data.image_key}`);
-      return response.data.image_key;
+    const imageKey = response?.data?.image_key || response?.image_key;
+    if (imageKey) {
+      console.log(`[IMAGE] Uploaded: ${imageKey}`);
+      return imageKey;
     }
   } catch (e) {
     console.error("[ERROR] Failed to upload image:", e.message);
@@ -420,6 +461,84 @@ async function handleMessage(data) {
       if (!mediaPath && !shouldRespondInGroup(text, mentions)) return;
     }
 
+    // Handle /help command — list available commands
+    if (text.trim().toLowerCase() === "/help") {
+      await client.im.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: 
+`📋 可用指令：
+
+/help — 顯示此說明
+/reset — 重置對話 session（開始新對話）
+/status — 顯示目前 session 資訊
+/draw <描述> — AI 生圖（Gemini Imagen）
+
+💬 一般訊息直接傳送給 AI 助理
+📷 傳送圖片會自動辨識分析` }) },
+      });
+      return;
+    }
+
+    // Handle /draw command — generate image with Gemini
+    if (text.trim().toLowerCase().startsWith("/draw")) {
+      const prompt = text.trim().slice(5).trim();
+      if (!prompt) {
+        await client.im.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: "⚠️ 用法: /draw <圖片描述>\n例如: /draw 一隻在月球上的貓" }) },
+        });
+        return;
+      }
+      // Send thinking placeholder
+      let drawPlaceholderId = "";
+      try {
+        const res = await client.im.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: "🎨 生成中…" }) },
+        });
+        drawPlaceholderId = res?.data?.message_id || "";
+      } catch {}
+
+      try {
+        const result = await generateImage(prompt);
+        // Delete placeholder
+        if (drawPlaceholderId) {
+          try { await client.im.message.delete({ path: { message_id: drawPlaceholderId } }); } catch {}
+        }
+        if (result.imagePath) {
+          const imageKey = await uploadImage(result.imagePath);
+          if (imageKey) {
+            await sendImageMessage(chatId, imageKey, prompt);
+            console.log(`[DRAW] Generated and sent image for: "${prompt}"`);
+          }
+          // Send text description if any
+          if (result.text) {
+            await client.im.message.create({
+              params: { receive_id_type: "chat_id" },
+              data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: result.text }) },
+            });
+          }
+          // Clean up temp file
+          try { fs.unlinkSync(result.imagePath); } catch {}
+        } else {
+          await client.im.message.create({
+            params: { receive_id_type: "chat_id" },
+            data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: `❌ 生圖失敗：${result.error || "未知錯誤"}` }) },
+          });
+        }
+      } catch (e) {
+        if (drawPlaceholderId) {
+          try { await client.im.message.delete({ path: { message_id: drawPlaceholderId } }); } catch {}
+        }
+        console.error("[DRAW] Error:", e.message);
+        await client.im.message.create({
+          params: { receive_id_type: "chat_id" },
+          data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: `❌ 生圖失敗：${e.message}` }) },
+        });
+      }
+      return;
+    }
+
     // Handle /reset command — start a new session
     if (text.trim().toLowerCase() === "/reset") {
       const newSuffix = Date.now().toString(36);
@@ -473,7 +592,17 @@ async function handleMessage(data) {
       if (timer) clearTimeout(timer);
     }
 
-    const trimmed = (reply.text || "").trim();
+    // Extract MEDIA: local file paths from reply text
+    const mediaPathRegex = /MEDIA:(\/[^\s]+)/g;
+    const localMediaPaths = [];
+    let cleanText = reply.text || "";
+    let m;
+    while ((m = mediaPathRegex.exec(cleanText)) !== null) {
+      localMediaPaths.push(m[1]);
+    }
+    cleanText = cleanText.replace(/MEDIA:\/[^\s]+/g, "").trim();
+
+    const trimmed = cleanText;
     if (!trimmed || trimmed === "NO_REPLY" || trimmed.endsWith("NO_REPLY")) {
       if (placeholderId) {
         try {
@@ -524,6 +653,25 @@ async function handleMessage(data) {
       }
     }
 
+    // Send local MEDIA: images (e.g. browser screenshots)
+    if (localMediaPaths.length > 0) {
+      for (const filePath of localMediaPaths) {
+        try {
+          if (fs.existsSync(filePath)) {
+            const imageKey = await uploadImage(filePath);
+            if (imageKey) {
+              await sendImageMessage(chatId, imageKey);
+              console.log(`[IMAGE] Sent local media: ${filePath}`);
+            }
+          } else {
+            console.warn(`[IMAGE] Local file not found: ${filePath}`);
+          }
+        } catch (e) {
+          console.error("[ERROR] Failed to send local media:", e.message);
+        }
+      }
+    }
+
     console.log(`[MSG] Sent reply to ${chatId}`);
   } catch (e) {
     console.error("[ERROR] message handler:", e);
@@ -555,6 +703,65 @@ const server = http.createServer(async (req, res) => {
   if (req.method === "GET" && req.url === "/health") {
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, appId: APP_ID }));
+    return;
+  }
+
+  // API: Send image to a Lark chat
+  if (req.method === "POST" && req.url === "/api/send-image") {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    try {
+      const { chat_id, file_path, text } = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (!chat_id || !file_path) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "chat_id and file_path required" }));
+        return;
+      }
+      const imageKey = await uploadImage(file_path);
+      if (!imageKey) {
+        res.writeHead(500, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "Failed to upload image" }));
+        return;
+      }
+      await sendImageMessage(chat_id, imageKey, text || "");
+      console.log(`[API] Sent image to ${chat_id}: ${file_path}`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, image_key: imageKey }));
+    } catch (e) {
+      console.error("[API] send-image error:", e.message);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
+    return;
+  }
+
+  // API: Send text message to a Lark chat
+  if (req.method === "POST" && req.url === "/api/send-text") {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    try {
+      const { chat_id, text } = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+      if (!chat_id || !text) {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "chat_id and text required" }));
+        return;
+      }
+      await client.im.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: {
+          receive_id: chat_id,
+          msg_type: "text",
+          content: JSON.stringify({ text }),
+        },
+      });
+      console.log(`[API] Sent text to ${chat_id}`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true }));
+    } catch (e) {
+      console.error("[API] send-text error:", e.message);
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: false, error: e.message }));
+    }
     return;
   }
 
