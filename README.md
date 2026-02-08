@@ -1,6 +1,6 @@
 # Larksuite ↔ OpenClaw Bridge
 
-Larksuite (飛書) Webhook bridge，將 Lark Bot 訊息轉發至 OpenClaw Gateway，並回傳 AI 回覆。
+Larksuite Webhook bridge，將 Lark Bot 訊息轉發至 OpenClaw Gateway，並回傳 AI 回覆。
 
 ## 架構
 
