@@ -118,6 +118,9 @@ const client = new lark.Client(sdkConfig);
 const seen = new Map();
 const SEEN_TTL_MS = 10 * 60 * 1000;
 
+// Session reset overrides: chatId → suffix (used to create new sessionKey)
+const sessionOverrides = new Map();
+
 function isDuplicate(messageId) {
   const now = Date.now();
   for (const [k, ts] of seen) {
@@ -417,7 +420,31 @@ async function handleMessage(data) {
       if (!mediaPath && !shouldRespondInGroup(text, mentions)) return;
     }
 
-    const sessionKey = `larksuite:${chatId}`;
+    // Handle /reset command — start a new session
+    if (text.trim().toLowerCase() === "/reset") {
+      const newSuffix = Date.now().toString(36);
+      sessionOverrides.set(chatId, newSuffix);
+      console.log(`[RESET] Session reset for ${chatId} → suffix: ${newSuffix}`);
+      await client.im.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: "✅ Session 已重置，開始新對話。" }) },
+      });
+      return;
+    }
+
+    // Handle /status command — show current session info
+    if (text.trim().toLowerCase() === "/status") {
+      const suffix = sessionOverrides.get(chatId);
+      const sk = suffix ? `larksuite:${chatId}:${suffix}` : `larksuite:${chatId}`;
+      await client.im.message.create({
+        params: { receive_id_type: "chat_id" },
+        data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: `📊 Session: ${sk}\nChat: ${chatId}\nType: ${message?.chat_type || "unknown"}` }) },
+      });
+      return;
+    }
+
+    const suffix = sessionOverrides.get(chatId);
+    const sessionKey = suffix ? `larksuite:${chatId}:${suffix}` : `larksuite:${chatId}`;
     console.log(`[MSG] Received: "${text.substring(0, 50)}${text.length > 50 ? '...' : ''}" from ${chatId}${mediaPath ? ' (with image)' : ''}`);
 
     let placeholderId = "";
