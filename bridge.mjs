@@ -602,6 +602,18 @@ async function handleMessage(data) {
     }
     cleanText = cleanText.replace(/MEDIA:\/[^\s]+/g, "").trim();
 
+    // Also detect bare image file paths in reply text (e.g. /Users/.../image.png)
+    const imageExtensions = /\.(png|jpg|jpeg|gif|webp)$/i;
+    const barePathRegex = /(\/(?:Users|tmp|var|home)[^\s"'`\]>)]+\.(?:png|jpg|jpeg|gif|webp))/gi;
+    let bp;
+    while ((bp = barePathRegex.exec(cleanText)) !== null) {
+      const p = bp[1];
+      if (!localMediaPaths.includes(p) && fs.existsSync(p)) {
+        localMediaPaths.push(p);
+        console.log(`[IMAGE] Detected bare image path in reply: ${p}`);
+      }
+    }
+
     const trimmed = cleanText;
     if (!trimmed || trimmed === "NO_REPLY" || trimmed.endsWith("NO_REPLY")) {
       if (placeholderId) {
