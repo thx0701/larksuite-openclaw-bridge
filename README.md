@@ -64,26 +64,22 @@ launchctl list | grep lark-bridge
 - stdout: `~/.openclaw/logs/lark-bridge.log`
 - stderr: `~/.openclaw/logs/lark-bridge.err`
 
-### Cloudflare Tunnel 路由
+### Cloudflare Tunnel 路由（範例）
 
 | 域名 | 目標 |
 |------|------|
-| `bot.asources.com` | `localhost:18789` (OpenClaw Gateway) |
-| `larkbot.asources.com` | `localhost:3000` (Lark Bridge) |
-
-Tunnel: `thxmac` (ID: `37559c39-a180-418f-9426-72d211990c5d`)
+| `bot.example.com` | `localhost:18789` (OpenClaw Gateway) |
+| `larkbot.example.com` | `localhost:3000` (Lark Bridge) |
 
 ## Lark 開發者後台設定
 
-- **App ID**: `cli_a4f2d4d59cb89009`
-- **App Name**: moltbot
-- **組織**: OSSLab
-- **事件訂閱 Webhook URL**: `https://larkbot.asources.com/webhook`
-- **卡片回調 URL**: `https://larkbot.asources.com/webhook/card`
+- **App ID**: 在 [Lark 開放平台](https://open.larksuite.com/app) 建立應用取得
+- **事件訂閱 Webhook URL**: `https://your-domain.com/webhook`
+- **卡片回調 URL**: `https://your-domain.com/webhook/card`
 - **訂閱事件**:
   - `im.message.receive_v1` — 接收訊息
   - `im.chat.member.bot.added_v1` — Bot 加入群組
-  - `im.message.message_read_v1` — 已讀回執
+  - `im.message.message_read_v1` — 已讀回執（可選）
 
 ## Session 管理
 
