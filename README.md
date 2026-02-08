@@ -99,15 +99,6 @@ launchctl list | grep lark-bridge
 
 圖片以 base64 data URL 放在 `attachments[]` 陣列（與 webchat 相同格式）。
 
-## 已知問題
-
-### 230001 Card Error
-```
-code: 230001, msg: 'This message is NOT a card.'
-```
-**原因**：Thinking 佔位符是純文字，`message.patch` 嘗試更新時 Lark 回報錯誤。
-**處理**：已修復。patch 失敗時自動刪除佔位符，改用新訊息發送回覆。
-
 ## 除錯
 
 查看即時日誌：
