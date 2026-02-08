@@ -120,6 +120,7 @@ const SEEN_TTL_MS = 10 * 60 * 1000;
 
 // Session reset overrides: chatId → suffix (used to create new sessionKey)
 const sessionOverrides = new Map();
+const activeHandleSessions = new Set(); // chatIds currently being processed by handleMessage
 
 function isDuplicate(messageId) {
   const now = Date.now();
@@ -372,11 +373,13 @@ function shouldRespondInGroup(text, mentions) {
 // ─── Message Handler ─────────────────────────────────────────────
 
 async function handleMessage(data) {
+  let _chatId = null;
   try {
     const { message } = data;
-    const chatId = message?.chat_id;
+    const chatId = _chatId = message?.chat_id;
     const messageId = message?.message_id;
     if (!chatId) return;
+    activeHandleSessions.add(chatId);
 
     if (isDuplicate(messageId)) { console.log(`[DEDUP] Skipping duplicate ${messageId}`); return; }
 
@@ -684,9 +687,14 @@ async function handleMessage(data) {
       }
     }
 
+    // Mark as delivered so poller won't re-send
+    const sk = suffix ? `larksuite:${chatId}:${suffix}` : `larksuite:${chatId}`;
+    lastDeliveredTimestamp.set(`agent:main:${sk}`, Date.now());
     console.log(`[MSG] Sent reply to ${chatId}`);
   } catch (e) {
     console.error("[ERROR] message handler:", e);
+  } finally {
+    if (_chatId) activeHandleSessions.delete(_chatId);
   }
 }
 
@@ -856,4 +864,206 @@ server.listen(WEBHOOK_PORT, () => {
   console.log(`    Agent: ${CLAWDBOT_AGENT_ID}`);
   console.log("");
   console.log("Waiting for messages from Larksuite...");
+
+  // Start session poller for async replies (subagent completions, etc.)
+  startSessionPoller();
 });
+
+// ─── Session Poller (catch async replies) ────────────────────────
+
+const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS || "15000"); // 15s default
+
+// One-shot WebSocket request to gateway
+function gatewayRequest(method, params = {}, timeoutMs = 10000) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${GATEWAY_PORT}`);
+    const timer = setTimeout(() => { try { ws.close(); } catch {} reject(new Error("timeout")); }, timeoutMs);
+    let connected = false;
+    const reqId = `poll-${Date.now()}`;
+
+    ws.on("open", () => {});
+    ws.on("error", (e) => { clearTimeout(timer); reject(e); });
+    ws.on("close", () => { if (!connected) { clearTimeout(timer); reject(new Error("closed")); } });
+    ws.on("message", (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+
+      if (msg.type === "event" && msg.event === "connect.challenge") {
+        ws.send(JSON.stringify({
+          type: "req", id: "connect", method: "connect",
+          params: {
+            minProtocol: 3, maxProtocol: 3,
+            client: { id: "gateway-client", version: "0.2.0", platform: "macos", mode: "backend" },
+            role: "operator", scopes: ["operator.read", "operator.write"],
+            auth: { token: GATEWAY_TOKEN },
+            locale: "en-US", userAgent: "larksuite-poller",
+          },
+        }));
+        return;
+      }
+
+      if (msg.type === "res" && msg.id === "connect") {
+        if (!msg.ok) { clearTimeout(timer); ws.close(); reject(new Error(`connect failed: ${JSON.stringify(msg.error)}`)); return; }
+        connected = true;
+        ws.send(JSON.stringify({ type: "req", id: reqId, method, params }));
+        return;
+      }
+
+      if (msg.type === "res" && msg.id === reqId) {
+        clearTimeout(timer);
+        ws.close();
+        if (msg.ok) resolve(msg.payload);
+        else reject(new Error(msg.error?.message || "request failed"));
+      }
+    });
+  });
+}
+const lastDeliveredTimestamp = new Map(); // sessionKey → last delivered message timestamp
+
+async function pollSessions() {
+  try {
+    // Query gateway for active larksuite sessions via WebSocket
+    const data = await gatewayRequest("sessions.list", { activeMinutes: 30 });
+    if (!data?.sessions) return;
+
+    for (const session of data.sessions) {
+      const sk = session.key;
+      if (!sk || !sk.startsWith("agent:main:larksuite:")) continue;
+
+      // Extract chatId from session key: agent:main:larksuite:{chatId}[:suffix]
+      const parts = sk.split(":");
+      if (parts.length < 4) continue;
+      const chatId = parts[3];
+
+      // Skip if currently being handled by handleMessage
+      if (activeHandleSessions.has(chatId)) continue;
+
+      // Check if session was updated since last delivery
+      const prevTs = lastDeliveredTimestamp.get(sk) || 0;
+      if (session.updatedAt <= prevTs) continue;
+
+      // Fetch last message via a lightweight chat.send with a status query
+      // Instead, use the inputTokens change as a signal — if inputTokens grew, there's likely a new reply
+      // Simpler: just send an empty ping to get the latest reply via WebSocket stream
+      // Actually simplest: use sessions.list updatedAt + track what we already sent
+
+      // We detected a session update we haven't delivered. 
+      // Use a WebSocket stream to fetch the latest assistant reply
+      try {
+        const reply = await fetchLatestReply(sk);
+        if (!reply || !reply.text) { lastDeliveredTimestamp.set(sk, session.updatedAt); continue; }
+
+        const text = reply.text.trim();
+        if (!text || text === "NO_REPLY" || text.endsWith("NO_REPLY")) {
+          lastDeliveredTimestamp.set(sk, session.updatedAt);
+          continue;
+        }
+
+        // Extract and send images from text
+        const imageExtRegex = /(\/(?:Users|tmp|var|home)[^\s"'`\]>)]+\.(?:png|jpg|jpeg|gif|webp))/gi;
+        let imgMatch;
+        while ((imgMatch = imageExtRegex.exec(text)) !== null) {
+          const imgPath = imgMatch[1];
+          if (fs.existsSync(imgPath)) {
+            try {
+              const imageKey = await uploadImage(imgPath);
+              if (imageKey) {
+                await sendImageMessage(chatId, imageKey);
+                console.log(`[POLL] Sent image to ${chatId}: ${imgPath}`);
+              }
+            } catch {}
+          }
+        }
+
+        // Clean paths from text
+        let cleanText = text.replace(/MEDIA:\/[^\s]+/g, "").trim();
+        cleanText = cleanText.replace(/(\/(?:Users|tmp|var|home)[^\s"'`\]>)]+\.(?:png|jpg|jpeg|gif|webp))/gi, "").trim();
+
+        if (cleanText) {
+          await client.im.message.create({
+            params: { receive_id_type: "chat_id" },
+            data: { receive_id: chatId, msg_type: "text", content: JSON.stringify({ text: cleanText }) },
+          });
+          console.log(`[POLL] Delivered async reply to ${chatId}: "${cleanText.substring(0, 60)}..."`);
+        }
+
+        lastDeliveredTimestamp.set(sk, session.updatedAt);
+      } catch (e) {
+        console.error(`[POLL] Failed to deliver to ${chatId}:`, e.message);
+        // Still update timestamp to avoid retry loops
+        lastDeliveredTimestamp.set(sk, session.updatedAt);
+      }
+    }
+  } catch (e) {
+    if (e.message !== "timeout" && e.code !== "ECONNREFUSED") console.error("[POLL] Error:", e.message);
+  }
+}
+
+// Fetch latest assistant reply from a session by sending a no-op and reading the stream
+// This uses chat.send with a special __poll__ message that the agent will ignore
+async function fetchLatestReply(sessionKey) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(`ws://127.0.0.1:${GATEWAY_PORT}`);
+    const timer = setTimeout(() => { try { ws.close(); } catch {} resolve(null); }, 8000);
+    let buf = "";
+
+    ws.on("error", () => { clearTimeout(timer); resolve(null); });
+    ws.on("close", () => { clearTimeout(timer); });
+    ws.on("message", (raw) => {
+      let msg;
+      try { msg = JSON.parse(raw.toString()); } catch { return; }
+
+      if (msg.type === "event" && msg.event === "connect.challenge") {
+        ws.send(JSON.stringify({
+          type: "req", id: "connect", method: "connect",
+          params: {
+            minProtocol: 3, maxProtocol: 3,
+            client: { id: "gateway-client", version: "0.2.0", platform: "macos", mode: "backend" },
+            role: "operator", scopes: ["operator.read", "operator.write"],
+            auth: { token: GATEWAY_TOKEN },
+            locale: "en-US", userAgent: "larksuite-poller",
+          },
+        }));
+        return;
+      }
+
+      if (msg.type === "res" && msg.id === "connect") {
+        if (!msg.ok) { clearTimeout(timer); ws.close(); resolve(null); return; }
+        // Request session transcript/last message
+        ws.send(JSON.stringify({
+          type: "req", id: "history",
+          method: "sessions.transcript",
+          params: { sessionKey, tail: 1 },
+        }));
+        return;
+      }
+
+      if (msg.type === "res" && msg.id === "history") {
+        clearTimeout(timer);
+        ws.close();
+        if (msg.ok && msg.payload?.messages?.length > 0) {
+          const lastMsg = msg.payload.messages[msg.payload.messages.length - 1];
+          if (lastMsg.role === "assistant") {
+            let text = "";
+            for (const part of (lastMsg.content || [])) {
+              if (part.type === "text") text += part.text;
+            }
+            resolve({ text, timestamp: lastMsg.timestamp });
+          } else {
+            resolve(null);
+          }
+        } else {
+          resolve(null);
+        }
+        return;
+      }
+    });
+  });
+}
+
+function startSessionPoller() {
+  console.log(`[POLL] Session poller started (interval: ${POLL_INTERVAL_MS}ms)`);
+  setInterval(pollSessions, POLL_INTERVAL_MS);
+  // Initial poll after 5s
+  setTimeout(pollSessions, 5000);
+}
